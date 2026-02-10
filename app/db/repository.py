@@ -91,6 +91,13 @@ def upsert_episode_mirror(session: Session, episode_id: int, mirror_data: dict) 
         models.EpisodeMirror.mirror_q == mirror_data["mirror_q"],
     )
     existing = session.execute(stmt).scalar_one_or_none()
+    if not existing:
+        stmt = select(models.EpisodeMirror).where(
+            models.EpisodeMirror.episode_id == episode_id,
+            models.EpisodeMirror.quality == mirror_data["quality"],
+            models.EpisodeMirror.provider_name == mirror_data["provider_name"],
+        )
+        existing = session.execute(stmt).scalar_one_or_none()
     if existing:
         for k, v in mirror_data.items():
             setattr(existing, k, v)
