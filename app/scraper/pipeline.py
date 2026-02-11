@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime
 from urllib.parse import urljoin
-from typing import List, Optional
+from typing import List, Optional, cast
 
 from app.core.config import get_settings
 from app.db import models
@@ -11,6 +11,7 @@ from app.db.repository import (
     sync_anime_genres,
     upsert_episodes,
     upsert_episode_mirror,
+    is_anime_fully_mirrored,
 )
 from app.db.session import SessionLocal, engine
 from app.scraper.client import ScraperClient
@@ -176,20 +177,39 @@ async def scrape_anime_item(
     episode_semaphore: asyncio.Semaphore,
     ajax_semaphore: asyncio.Semaphore,
 ) -> None:
-    logger.info("processing anime", extra={"url": item["href"], "title": item["title"]})
+    raw_status = item.get("status")
+    list_status = raw_status.strip().lower() if isinstance(raw_status, str) else None
+    href = item.get("href")
+    title = item.get("title")
+    if not href or not title:
+        missing_fields = {
+            "href": item.get("href"),
+            "title": item.get("title"),
+            "status": item.get("status"),
+        }
+        logger.warning("missing anime list fields", extra=missing_fields)
+        return
     anime_data = {
-        "source_url": item["href"],
-        "title": item["title"],
-        "status_list_page": item["status"],
+        "source_url": href,
+        "title": title,
         "last_scraped_at": datetime.utcnow(),
     }
+    if raw_status is not None:
+        anime_data["status_list_page"] = raw_status
+
+    logger.info("processing anime", extra={"url": href, "title": title})
 
     with SessionLocal() as session:
         anime = upsert_anime(session, anime_data)
         session.commit()
         session.refresh(anime)
 
-    detail_resp = await client.get(item["href"])
+        if list_status == "completed":
+            if is_anime_fully_mirrored(session, cast(int, anime.id)):
+                logger.info("skipping completed anime", extra={"url": href, "title": title})
+                return
+
+    detail_resp = await client.get(href)
     detail_data, genres, synopsis = parse_detail(detail_resp.text)
     episodes = parse_episodes(detail_resp.text)
 
@@ -213,10 +233,10 @@ async def scrape_anime_item(
                     ep["episode_id"] = episode_ids_by_url.get(episode_url)
 
             session.commit()
-            logger.info("committed anime", extra={"url": item["href"], "episodes": len(episodes)})
+            logger.info("committed anime", extra={"url": href, "episodes": len(episodes)})
         except Exception as exc:  # noqa: BLE001
             session.rollback()
-            logger.warning("anime commit failed", extra={"url": item["href"], "error": str(exc)})
+            logger.warning("anime commit failed", extra={"url": href, "error": str(exc)})
             raise
 
     if settings.scraper_fetch_mirrors:

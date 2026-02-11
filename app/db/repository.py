@@ -1,7 +1,8 @@
 from datetime import datetime
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Optional, Union, cast
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, func
+import re
 
 from app.db import models
 
@@ -107,6 +108,41 @@ def upsert_episode_mirror(session: Session, episode_id: int, mirror_data: dict) 
     mirror = models.EpisodeMirror(**mirror_data, episode_id=episode_id)
     session.add(mirror)
     return mirror
+
+
+def _parse_total_episode(total_episode_raw: Optional[Union[str, int]]) -> Optional[int]:
+    if total_episode_raw is None:
+        return None
+    match = re.search(r"\d+", str(total_episode_raw))
+    if not match:
+        return None
+    return int(match.group(0))
+
+
+def is_anime_fully_mirrored(session: Session, anime_id: int) -> bool:
+    anime = session.get(models.Anime, anime_id)
+    if not anime:
+        return False
+
+    total_episode = _parse_total_episode(cast(Optional[Union[str, int]], anime.total_episode))
+    if not total_episode:
+        return False
+
+    episode_count, mirrored_episode_count = session.execute(
+        select(
+            func.count(func.distinct(models.Episode.id)),
+            func.count(func.distinct(models.EpisodeMirror.episode_id)),
+        )
+        .outerjoin(models.EpisodeMirror, models.Episode.id == models.EpisodeMirror.episode_id)
+        .where(models.Episode.anime_id == anime_id)
+    ).one()
+
+    if not episode_count:
+        return False
+
+    return episode_count == mirrored_episode_count == total_episode
+
+
 
 
 def get_episode_mirrors(session: Session, episode_id: int, quality: str | None, provider: str | None, limit: int, offset: int) -> Tuple[List[models.EpisodeMirror], int]:
