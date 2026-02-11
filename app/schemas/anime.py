@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class EpisodeOut(BaseModel):
@@ -32,7 +32,37 @@ class AnimeDetail(AnimeBase):
     release_date: Optional[str] = None
     studio: Optional[str] = None
     synopsis: Optional[str] = None
-    genres: List[str] = []
+    genres: List[str] = Field(default_factory=list)
+
+    @field_validator("genres", mode="before")
+    @classmethod
+    def normalize_genres(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, str):
+            values = [value]
+        elif isinstance(value, (set, tuple)):
+            values = list(value)
+        elif isinstance(value, list):
+            values = value
+        else:
+            values = [value]
+
+        normalized: List[str] = []
+        for item in values:
+            if item is None:
+                continue
+            if hasattr(item, "name"):
+                item = getattr(item, "name")
+            if item is None:
+                continue
+            if not isinstance(item, str):
+                item = str(item)
+            item = item.strip()
+            if not item:
+                continue
+            normalized.append(item)
+        return normalized
 
 
 class AnimeListResponse(BaseModel):

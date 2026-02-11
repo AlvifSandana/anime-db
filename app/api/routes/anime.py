@@ -39,9 +39,7 @@ def anime_detail(anime_id: int, db: Session = Depends(get_db)):
     anime = repository.get_anime_by_id(db, anime_id)
     if not anime:
         raise HTTPException(status_code=404, detail="Anime not found")
-    detail = AnimeDetail.from_orm(anime)
-    detail.genres = [g.name for g in anime.genres]
-    return detail
+    return AnimeDetail.model_validate(anime)
 
 
 @router.get("/{anime_id}/episodes", response_model=EpisodeListResponse)
