@@ -47,6 +47,10 @@ class Settings(BaseModel):
     scraper_concurrency: int = max(1, int(os.getenv("SCRAPER_CONCURRENCY", 8)))
     scraper_episode_concurrency: int = max(1, int(os.getenv("SCRAPER_EPISODE_CONCURRENCY", 2)))
     scraper_mirror_concurrency: int = max(1, int(os.getenv("SCRAPER_MIRROR_CONCURRENCY", 4)))
+    scraper_ongoing_refresh_hours: int = max(1, int(os.getenv("SCRAPER_ONGOING_REFRESH_HOURS", 6)))
+    scraper_retry_incomplete_mirrors: bool = (
+        os.getenv("SCRAPER_RETRY_INCOMPLETE_MIRRORS", "true").lower() == "true"
+    )
     scraper_ajax_delay_min: float = float(os.getenv("SCRAPER_AJAX_DELAY_MIN", 0.3))
     scraper_ajax_delay_max: float = float(os.getenv("SCRAPER_AJAX_DELAY_MAX", 1.0))
     scraper_ajax_max_retries: int = int(os.getenv("SCRAPER_AJAX_MAX_RETRIES", 2))

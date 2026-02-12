@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 from typing import List, Optional, cast
 
@@ -12,6 +12,9 @@ from app.db.repository import (
     upsert_episodes,
     upsert_episode_mirror,
     is_anime_fully_mirrored,
+    get_episode_urls_by_anime,
+    get_episode_ids_with_incomplete_mirrors,
+    get_episodes_by_ids,
 )
 from app.db.session import SessionLocal, engine
 from app.scraper.client import ScraperClient
@@ -171,6 +174,13 @@ def init_db() -> None:
     models.Base.metadata.create_all(bind=engine)
 
 
+def normalize_status(value: Optional[str]) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower().replace(" ", "").replace("-", "")
+    return normalized or None
+
+
 async def scrape_anime_item(
     item: dict,
     client: ScraperClient,
@@ -209,10 +219,37 @@ async def scrape_anime_item(
                 logger.info("skipping completed anime", extra={"url": href, "title": title})
                 return
 
+        last_scraped_at_raw = anime.last_scraped_at
+        last_status_detail_raw = anime.status_detail
+
+    list_status_normalized = normalize_status(list_status)
+    last_status_detail_normalized = normalize_status(
+        last_status_detail_raw if isinstance(last_status_detail_raw, str) else None
+    )
+    if list_status_normalized == "ongoing" and last_status_detail_normalized == "ongoing":
+        last_scraped_at_value = last_scraped_at_raw if isinstance(last_scraped_at_raw, datetime) else None
+        if last_scraped_at_value is not None:
+            last_scraped_at = cast(datetime, last_scraped_at_value)
+            if last_scraped_at.tzinfo is None:
+                last_scraped_at = last_scraped_at.replace(tzinfo=timezone.utc)
+            next_refresh = last_scraped_at + timedelta(hours=settings.scraper_ongoing_refresh_hours)
+            now = datetime.now(timezone.utc)
+            if now < next_refresh:
+                logger.info(
+                    "skipping ongoing anime refresh",
+                    extra={"url": href, "title": title, "next_refresh": next_refresh.isoformat()},
+                )
+                return
+
     detail_resp = await client.get(href)
     detail_data, genres, synopsis = parse_detail(detail_resp.text)
     episodes = parse_episodes(detail_resp.text)
+    detail_status = detail_data.get("status_detail")
+    detail_status_normalized = normalize_status(detail_status)
+    is_ongoing = list_status_normalized == "ongoing" and detail_status_normalized == "ongoing"
 
+    new_episode_urls: set[str] = set()
+    retry_episode_ids: List[int] = []
     with SessionLocal() as session:
         try:
             anime = upsert_anime(session, anime_data)
@@ -223,14 +260,25 @@ async def scrape_anime_item(
             sync_anime_genres(session, anime, genres)
             session.flush()
 
+            existing_episode_urls = (
+                get_episode_urls_by_anime(session, cast(int, anime.id)) if is_ongoing else set()
+            )
+
             for ep in episodes:
                 ep["anime_id"] = anime.id
+                episode_url = ep.get("episode_url")
+                if is_ongoing and episode_url and episode_url not in existing_episode_urls:
+                    new_episode_urls.add(episode_url)
+
             episode_rows = upsert_episodes(session, anime, episodes)
             episode_ids_by_url = {row.episode_url: row.id for row in episode_rows}
             for ep in episodes:
                 episode_url = ep.get("episode_url")
                 if episode_url:
                     ep["episode_id"] = episode_ids_by_url.get(episode_url)
+
+            if is_ongoing and settings.scraper_retry_incomplete_mirrors:
+                retry_episode_ids = get_episode_ids_with_incomplete_mirrors(session, cast(int, anime.id))
 
             session.commit()
             logger.info("committed anime", extra={"url": href, "episodes": len(episodes)})
@@ -240,7 +288,27 @@ async def scrape_anime_item(
             raise
 
     if settings.scraper_fetch_mirrors:
-        await scrape_episode_mirrors(client, episodes, episode_semaphore, ajax_semaphore)
+        episodes_to_mirror = episodes
+        if is_ongoing:
+            new_episodes = [ep for ep in episodes if ep.get("episode_url") in new_episode_urls]
+            retry_episodes: List[dict] = []
+            if retry_episode_ids:
+                with SessionLocal() as session:
+                    retry_rows = get_episodes_by_ids(session, retry_episode_ids)
+                retry_episodes = [
+                    {"episode_id": row.id, "episode_url": row.episode_url}
+                    for row in retry_rows
+                    if row.episode_url is not None
+                ]
+            seen_ids = {ep.get("episode_id") for ep in new_episodes if ep.get("episode_id")}
+            for retry_ep in retry_episodes:
+                ep_id = retry_ep.get("episode_id")
+                if ep_id and ep_id not in seen_ids:
+                    new_episodes.append(retry_ep)
+                    seen_ids.add(ep_id)
+            episodes_to_mirror = new_episodes
+
+        await scrape_episode_mirrors(client, episodes_to_mirror, episode_semaphore, ajax_semaphore)
 
 
 async def scrape_once() -> None:

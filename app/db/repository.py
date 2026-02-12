@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Iterable, List, Tuple, Optional, Union, cast
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import exists, select, func
 import re
 
 from app.db import models
@@ -84,6 +84,13 @@ def get_episodes_by_anime(session: Session, anime_id: int, limit: int, offset: i
     return items, total
 
 
+def get_episode_urls_by_anime(session: Session, anime_id: int) -> set[str]:
+    rows = session.execute(
+        select(models.Episode.episode_url).where(models.Episode.anime_id == anime_id)
+    ).all()
+    return {row[0] for row in rows if row[0]}
+
+
 def upsert_episode_mirror(session: Session, episode_id: int, mirror_data: dict) -> models.EpisodeMirror:
     stmt = select(models.EpisodeMirror).where(
         models.EpisodeMirror.episode_id == episode_id,
@@ -108,6 +115,33 @@ def upsert_episode_mirror(session: Session, episode_id: int, mirror_data: dict) 
     mirror = models.EpisodeMirror(**mirror_data, episode_id=episode_id)
     session.add(mirror)
     return mirror
+
+
+def get_episode_ids_with_incomplete_mirrors(session: Session, anime_id: int) -> List[int]:
+    success_exists = exists().where(
+        (models.EpisodeMirror.episode_id == models.Episode.id)
+        & (models.EpisodeMirror.fetch_status == "success")
+    )
+    stmt = (
+        select(models.Episode.id)
+        .outerjoin(models.EpisodeMirror, models.Episode.id == models.EpisodeMirror.episode_id)
+        .where(models.Episode.anime_id == anime_id)
+        .where(
+            (models.EpisodeMirror.id.is_(None))
+            | (models.EpisodeMirror.fetch_status.in_(["failed", "partial"]))
+            | (models.EpisodeMirror.fetch_status.is_(None))
+        )
+        .where(~success_exists)
+        .distinct()
+    )
+    return [row[0] for row in session.execute(stmt).all()]
+
+
+def get_episodes_by_ids(session: Session, episode_ids: Iterable[int]) -> List[models.Episode]:
+    ids = [int(ep_id) for ep_id in episode_ids]
+    if not ids:
+        return []
+    return list(session.execute(select(models.Episode).where(models.Episode.id.in_(ids))).scalars().all())
 
 
 def _parse_total_episode(total_episode_raw: Optional[Union[str, int]]) -> Optional[int]:
